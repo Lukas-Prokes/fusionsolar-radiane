@@ -1,0 +1,25 @@
+name: 24-7 Solar Sync
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Runs every 5 minutes, every day, forever.
+  workflow_dispatch: # Allows you to run it manually to test
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run sync
+        env:
+          HUAWEI_USER: ${{ secrets.HUAWEI_USER }}
+          HUAWEI_PASS: ${{ secrets.HUAWEI_PASS }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_ID: ${{ secrets.CF_KV_ID }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: python sync_solar.py
