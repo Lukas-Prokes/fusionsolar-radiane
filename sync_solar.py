@@ -12,41 +12,42 @@ def run_sync():
         print(f"Connecting to {subdomain}...")
         client = FusionSolarClient(user, password, huawei_subdomain=subdomain)
         
-        # Get the stats object
-        stats = client.get_power_status()
+        # 1. Get the actual Plant ID (Huawei calls it plant_id or stationCode)
+        plant_ids = client.get_plant_ids()
+        if not plant_ids:
+            print("Login worked, but no plants found.")
+            return
         
-        # Correct attribute names for this library:
-        # current_power_kw, total_power_today_kwh, total_power_kwh
+        target_plant = plant_ids[0]
+        print(f"Targeting Plant: {target_plant}")
+
+        # 2. Get the RAW data dictionary (This contains the deep stats)
+        plant_stats = client.get_plant_stats(target_plant)
+        
+        # 3. Use the library's helper to extract the LATEST valid measurements
+        last_values = client.get_last_plant_data(plant_stats)
+
+        # 4. Map the data using the labels Huawei uses in 2026
+        # productPower = Solar, chargePower = Battery In, dischargePower = Battery Out
         data_to_send = {
-            "current_power": getattr(stats, 'current_power_kw', 0),
-            "daily_yield": getattr(stats, 'total_power_today_kwh', 0),
-            "total_yield": getattr(stats, 'total_power_kwh', 0),
-            # Battery fields can vary by plant setup, so we use a safe get
-            "battery_soc": getattr(stats, 'battery_soc', "N/A"),
-            "battery_power": getattr(stats, 'battery_power', "N/A")
+            "solar_power": last_values.get('productPower', {}).get('value', 0),
+            "battery_charge": last_values.get('chargePower', {}).get('value', 0),
+            "battery_discharge": last_values.get('dischargePower', {}).get('value', 0),
+            "consumption": last_values.get('usePower', {}).get('value', 0),
+            "grid_export": last_values.get('onGridPower', {}).get('value', 0)
         }
 
-        print(f"Data Extracted: {data_to_send}")
+        print(f"REAL DATA EXTRACTED: {data_to_send}")
 
-        # Push to Cloudflare
+        # 5. Push to Cloudflare
         cf_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID')}/storage/kv/namespaces/{os.getenv('CF_KV_ID')}/values/SOLAR_LIVE"
-        headers = {
-            "Authorization": f"Bearer {os.getenv('CF_TOKEN')}",
-            "Content-Type": "text/plain"
-        }
+        headers = {"Authorization": f"Bearer {os.getenv('CF_TOKEN')}", "Content-Type": "text/plain"}
         
         response = requests.put(cf_url, headers=headers, data=json.dumps(data_to_send))
-        
-        if response.status_code == 200:
-            print("Success! Cloudflare KV updated.")
-        else:
-            print(f"Cloudflare Error: {response.text}")
+        print("Success! Cloudflare updated with REAL values." if response.status_code == 200 else f"CF Error: {response.text}")
 
     except Exception as e:
-        print(f"Failed to sync: {str(e)}")
-        # This will help us if there's still a naming mismatch
-        if 'stats' in locals():
-            print(f"Available data fields are: {dir(stats)}")
+        print(f"Sync Failed: {str(e)}")
 
 if __name__ == "__main__":
     run_sync()
