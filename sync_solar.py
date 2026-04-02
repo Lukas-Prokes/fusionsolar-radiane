@@ -1,65 +1,48 @@
-import requests
 import os
 import json
+import requests
+from fusion_solar_py.client import FusionSolarClient
 
-USER = os.getenv("HUAWEI_USER")
-PASS = os.getenv("HUAWEI_PASS")
-REGION = "uni002eu5"
+def run_sync():
+    # 1. Setup credentials
+    user = os.getenv("HUAWEI_USER")
+    password = os.getenv("HUAWEI_PASS")
+    # This is the secret sauce for Sweden/Värmdö
+    subdomain = "uni002eu5" 
 
-def get_data():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "FusionSolar/6.26.1.1 (iPhone; iOS 17.4.1)",
-        "ClientType": "10",
-        "v-version": "6.26.1.1",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    })
-
-    # This is the specific "Unified Cluster" login path
-    login_url = f"https://{REGION}.fusionsolar.huawei.com/rest/app/v1/services/login"
-    
     try:
-        # 1. Login
-        r = s.post(login_url, json={"userName": USER, "password": PASS}, timeout=15)
+        # 2. Login using the specialized client
+        print(f"Connecting to {subdomain}...")
+        client = FusionSolarClient(user, password, huawei_subdomain=subdomain)
         
-        if r.status_code == 200:
-            data = r.json()
-            token = r.headers.get("xsrf-token")
-            
-            if token and data.get("success") != False:
-                print("Login Successful!")
-                # Extract stationCode from the login response directly
-                station_list = data.get("data", {}).get("stationList", [])
-                if not station_list:
-                    print("Login worked, but no stations found in this account.")
-                    return None
-                    
-                st_code = station_list[0].get("stationCode")
+        # 3. Get all power/battery stats
+        stats = client.get_power_status()
+        
+        # We convert the object to a dictionary so we can send it to Cloudflare
+        data_to_send = {
+            "current_power": stats.current_power,
+            "total_yield": stats.total_yield,
+            "daily_yield": stats.daily_yield,
+            "battery_soc": getattr(stats, 'battery_soc', 'N/A'), # Specifically for your battery
+            "battery_power": getattr(stats, 'battery_power', 'N/A')
+        }
 
-                # 2. Get Real-Time Data (KPI)
-                kpi_url = f"https://{REGION}.fusionsolar.huawei.com/rest/app/v1/getStationRealKpi"
-                kpi_res = s.post(kpi_url, json={"stationCodes": st_code}, headers={"xsrf-token": token})
-                
-                return kpi_res.json()
-            else:
-                print(f"Login logic failed: {data.get('message')}")
+        # 4. Push to Cloudflare KV
+        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID')}/storage/kv/namespaces/{os.getenv('CF_KV_ID')}/values/SOLAR_LIVE"
+        headers = {
+            "Authorization": f"Bearer {os.getenv('CF_TOKEN')}",
+            "Content-Type": "text/plain"
+        }
+        
+        response = requests.put(cf_url, headers=headers, data=json.dumps(data_to_send))
+        
+        if response.status_code == 200:
+            print("Successfully bridged data to Cloudflare!")
         else:
-            # If this is still 404, we will try the secondary 'uniflow' path
-            print(f"Primary endpoint 404'd. Status: {r.status_code}")
-            return None
-            
-    except Exception as e:
-        print(f"Connection Error: {e}")
-    return None
+            print(f"Cloudflare Error: {response.text}")
 
-def push_to_kv(data):
-    cf_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID')}/storage/kv/namespaces/{os.getenv('CF_KV_ID')}/values/SOLAR_LIVE"
-    h = {"Authorization": f"Bearer {os.getenv('CF_TOKEN')}", "Content-Type": "text/plain"}
-    requests.put(cf_url, headers=h, data=json.dumps(data))
+    except Exception as e:
+        print(f"Failed to sync: {str(e)}")
 
 if __name__ == "__main__":
-    result = get_data()
-    if result:
-        push_to_kv(result)
-        print("Success: Data pushed to Cloudflare.")
+    run_sync()
