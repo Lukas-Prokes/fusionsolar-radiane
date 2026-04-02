@@ -8,62 +8,58 @@ REGION = "uni002eu5"
 
 def get_data():
     s = requests.Session()
-    # We are now pretending to be a Desktop Chrome browser
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/json",
-        "X-Requested-With": "XMLHttpRequest"
+        "User-Agent": "FusionSolar/6.26.1.1 (iPhone; iOS 17.4.1)",
+        "ClientType": "10",
+        "v-version": "6.26.1.1",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
     })
 
-    # The Web Portal Login path
-    login_url = f"https://{REGION}.fusionsolar.huawei.com/rest/openapi/common/login"
+    # This is the specific "Unified Cluster" login path
+    login_url = f"https://{REGION}.fusionsolar.huawei.com/rest/app/v1/services/login"
     
     try:
-        # Step 1: Login
-        payload = {"userName": USER, "password": PASS}
-        r = s.post(login_url, json=payload, timeout=20)
+        # 1. Login
+        r = s.post(login_url, json={"userName": USER, "password": PASS}, timeout=15)
         
-        print(f"Server Status: {r.status_code}")
-        
-        # Check if login was successful
         if r.status_code == 200:
+            data = r.json()
             token = r.headers.get("xsrf-token")
-            # In the browser flow, the token might also be in a cookie
-            if not token:
-                token = s.cookies.get("XSRF-TOKEN")
-
-            if token:
-                print("Login Successful! Handshake complete.")
-                
-                # Step 2: Get Station Code
-                list_url = f"https://{REGION}.fusionsolar.huawei.com/rest/openapi/pvms/v1/station/get-station-list"
-                list_res = s.post(list_url, json={}, headers={"xsrf-token": token})
-                
-                stations = list_res.json().get("data", {}).get("list", [])
-                if stations:
-                    st_code = stations[0].get("stationCode")
+            
+            if token and data.get("success") != False:
+                print("Login Successful!")
+                # Extract stationCode from the login response directly
+                station_list = data.get("data", {}).get("stationList", [])
+                if not station_list:
+                    print("Login worked, but no stations found in this account.")
+                    return None
                     
-                    # Step 3: Get the Battery/KPI data
-                    kpi_url = f"https://{REGION}.fusionsolar.huawei.com/rest/openapi/pvms/v1/station/get-real-kpi"
-                    kpi_res = s.post(kpi_url, json={"stationCodes": st_code}, headers={"xsrf-token": token})
-                    return kpi_res.json()
+                st_code = station_list[0].get("stationCode")
+
+                # 2. Get Real-Time Data (KPI)
+                kpi_url = f"https://{REGION}.fusionsolar.huawei.com/rest/app/v1/getStationRealKpi"
+                kpi_res = s.post(kpi_url, json={"stationCodes": st_code}, headers={"xsrf-token": token})
+                
+                return kpi_res.json()
             else:
-                print(f"Login failed: Response was {r.text}")
+                print(f"Login logic failed: {data.get('message')}")
         else:
-            print(f"Network Error: {r.status_code}")
+            # If this is still 404, we will try the secondary 'uniflow' path
+            print(f"Primary endpoint 404'd. Status: {r.status_code}")
+            return None
             
     except Exception as e:
-        print(f"Script Error: {e}")
+        print(f"Connection Error: {e}")
     return None
 
 def push_to_kv(data):
-    url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID')}/storage/kv/namespaces/{os.getenv('CF_KV_ID')}/values/SOLAR_LIVE"
+    cf_url = f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID')}/storage/kv/namespaces/{os.getenv('CF_KV_ID')}/values/SOLAR_LIVE"
     h = {"Authorization": f"Bearer {os.getenv('CF_TOKEN')}", "Content-Type": "text/plain"}
-    requests.put(url, headers=h, data=json.dumps(data))
+    requests.put(cf_url, headers=h, data=json.dumps(data))
 
 if __name__ == "__main__":
     result = get_data()
     if result:
         push_to_kv(result)
-        print("Data successfully bridged to Cloudflare.")
+        print("Success: Data pushed to Cloudflare.")
