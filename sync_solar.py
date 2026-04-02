@@ -5,7 +5,9 @@ import json
 # Config
 USER = os.getenv("HUAWEI_USER")
 PASS = os.getenv("HUAWEI_PASS")
-REGION = "uni002eu5" # Change if your login URL is different
+# Update these lines in your sync_solar.py
+REGION = "uni002eu5" 
+login_url = f"https://{REGION}.fusionsolar.huawei.com/rest/app/v1/services/login"
 
 def get_data():
     s = requests.Session()
