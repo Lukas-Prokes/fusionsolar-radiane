@@ -5,7 +5,7 @@ import json
 # Config
 USER = os.getenv("HUAWEI_USER")
 PASS = os.getenv("HUAWEI_PASS")
-REGION = "region01eu5" # Change if your login URL is different
+REGION = "uni002eu5" # Change if your login URL is different
 
 def get_data():
     s = requests.Session()
