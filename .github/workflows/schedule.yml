@@ -1,25 +1,44 @@
 name: 24-7 Solar Sync
-on:
-  schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
 
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: pip install fusion-solar-py requests
-      - name: Run sync
-        env:
-          HUAWEI_USER: ${{ secrets.HUAWEI_USER }}
-          HUAWEI_PASS: ${{ secrets.HUAWEI_PASS }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_KV_ID: ${{ secrets.CF_KV_ID }}
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-        run: python sync_solar.py
+  on:
+    schedule:
+      - cron: '*/5 * * * *'
+    workflow_dispatch:
+      inputs:
+        huawei_user:
+          description: Huawei username
+          required: true
+          type: string
+        huawei_pass:
+          description: Huawei password
+          required: true
+          type: string
+        huawei_region:
+          description: Huawei region
+          required: false
+          default: uni002eu5
+          type: string
+
+  jobs:
+    sync:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: '3.10'
+
+        - name: Install dependencies
+          run: pip install fusion-solar-py requests
+
+        - name: Run sync
+          env:
+            HUAWEI_USER: ${{ github.event.inputs.huawei_user || secrets.HUAWEI_USER }}
+            HUAWEI_PASS: ${{ github.event.inputs.huawei_pass || secrets.HUAWEI_PASS }}
+            HUAWEI_REGION: ${{ github.event.inputs.huawei_region || 'uni002eu5' }}
+            CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+            CF_KV_ID: ${{ secrets.CF_KV_ID }}
+            CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          run: python sync_solar.py
