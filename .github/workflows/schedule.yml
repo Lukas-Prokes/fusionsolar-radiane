@@ -1,20 +1,21 @@
+name: 24-7 Solar Sync
 on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       huawei_user:
-        description: Huawei username
+        description: 'Huawei User'
         required: true
         type: string
       huawei_pass:
-        description: Huawei password
+        description: 'Huawei Password'
         required: true
         type: string
       huawei_region:
-        description: Huawei region
+        description: 'Huawei Region'
         required: false
-        default: uni002eu5
+        default: 'uni002eu5'
         type: string
 
 jobs:
@@ -22,15 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: pip install fusion-solar-py requests
-
       - name: Run sync
         env:
           HUAWEI_USER: ${{ github.event.inputs.huawei_user || secrets.HUAWEI_USER }}
