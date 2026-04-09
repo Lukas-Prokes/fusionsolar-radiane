@@ -1,8 +1,62 @@
-data_to_send = {
-    'solar_power': 0,
-    'battery_soc': 0,
-    'battery_power': 0,
-    'grid_power': 0,
-    'consumption': 0,
-    'synced_at': '2026-04-02 20:07:07'
-}
+import json
+import os
+import requests
+from datetime import datetime, timezone
+from fusion_solar_py.client import FusionSolarClient
+
+CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
+CF_KV_ID = os.environ['CF_KV_ID']
+CF_TOKEN = os.environ['CF_TOKEN']
+
+cf_headers = {'Authorization': f'Bearer {CF_TOKEN}'}
+
+
+def kv_url(key):
+    return (
+        f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}'
+        f'/storage/kv/namespaces/{CF_KV_ID}/values/{key}'
+    )
+
+
+# Load sync jobs from KV
+resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers)
+if resp.status_code == 404 or not resp.text.strip():
+    print('No sync jobs registered yet — nothing to do.')
+    exit(0)
+
+jobs = json.loads(resp.text)
+print(f'Found {len(jobs)} sync job(s)')
+
+for job in jobs:
+    username = job['username']
+    password = job['password']
+    region = job.get('region', 'uni002eu5')
+    station_id = job['stationId']
+    kv_key = f'SOLAR_LIVE_{station_id}'
+
+    try:
+        client = FusionSolarClient(username, password, huawei_subdomain=region)
+        kpi = client.get_station_real_kpi(station_code=station_id)
+
+        data_to_send = {
+            'solar_power': kpi.get('radiation_intensity', 0),
+            'battery_soc': kpi.get('storage_state_of_charge', 0),
+            'battery_power': kpi.get('storage_charge_discharge_power', 0),
+            'grid_power': kpi.get('grid_purchased_power', 0),
+            'consumption': kpi.get('inverter_power', kpi.get('use_power', 0)),
+            'grid_export': kpi.get('grid_power', 0),
+            'synced_at': datetime.now(timezone.utc).isoformat(),
+            'raw': kpi,
+        }
+
+        requests.put(
+            kv_url(kv_key),
+            data=json.dumps(data_to_send),
+            headers={**cf_headers, 'Content-Type': 'application/json'},
+        ).raise_for_status()
+
+        print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
+
+    except Exception as e:
+        print(f'Error syncing station={station_id}: {e}')
+        # Continue with remaining jobs
