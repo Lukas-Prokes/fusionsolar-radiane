@@ -1,0 +1,33 @@
+name: Discover FusionSolar Plants
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 'Discovery job ID (set by Cloudflare Worker)'
+        required: true
+        type: string
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install fusion-solar-py requests
+      - name: Read credentials from KV and discover plants
+        env:
+          JOB_ID: ${{ github.event.inputs.job_id }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_ID: ${{ secrets.CF_KV_ID }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        run: |
+          CREDS=$(curl -s -H "Authorization: Bearer $CF_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values/DISCOVER_CREDS_$JOB_ID")
+          export HUAWEI_USER=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['username'])")
+          export HUAWEI_PASS=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['password'])")
+          export HUAWEI_REGION=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('region','uni002eu5'))")
+          python discover_plants.py
