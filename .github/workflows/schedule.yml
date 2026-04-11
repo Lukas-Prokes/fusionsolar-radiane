@@ -7,17 +7,16 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+
       - name: Install dependencies
-        run: pip install fusion-solar-py requests
+        run: pip install fusion-solar-py requests --quiet
+
       - name: Run sync
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
-        run: python sync_solar.py
+        run: python3 sync_solar.py
