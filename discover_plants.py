@@ -1,19 +1,18 @@
 import os
 import sys
 import json
-import ssl
 import requests
 import urllib3
 from fusion_solar_py.client import FusionSolarClient
 
-# Disable SSL verification globally to handle FusionSolar's self-signed cert
+# Disable SSL verification for FusionSolar's self-signed cert
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-old_init = ssl.SSLContext.__init__
-def patched_init(self, *args, **kwargs):
-    old_init(self, *args, **kwargs)
-    self.check_hostname = False
-    self.verify_mode = ssl.CERT_NONE
-ssl.SSLContext.__init__ = patched_init
+requests.packages.urllib3.disable_warnings()
+_original_request = requests.Session.request
+def _no_verify_request(self, method, url, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _original_request(self, method, url, **kwargs)
+requests.Session.request = _no_verify_request
 
 HUAWEI_USER = os.environ['HUAWEI_USER']
 HUAWEI_PASS = os.environ['HUAWEI_PASS']
@@ -37,6 +36,7 @@ def write_kv(key, payload):
         kv_url(key),
         data=json.dumps(payload),
         headers={'Authorization': f'Bearer {CF_TOKEN}', 'Content-Type': 'application/json'},
+        verify=True,  # Cloudflare has a valid cert
     ).raise_for_status()
 
 
@@ -45,6 +45,7 @@ def delete_creds():
         requests.delete(
             kv_url(f'DISCOVER_CREDS_{JOB_ID}'),
             headers={'Authorization': f'Bearer {CF_TOKEN}'},
+            verify=True,
         )
     except Exception:
         pass
@@ -54,7 +55,6 @@ try:
     client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
     stations = client.get_station_list()
 
-    # stationCode is required for get_station_real_kpi() calls
     plants = [
         {
             'id': s['stationCode'],
@@ -72,7 +72,6 @@ try:
 except Exception as e:
     error_msg = str(e)
     print(f'ERROR: {error_msg}', file=sys.stderr)
-    # Always write a failure result so the app doesn't poll until timeout
     try:
         write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': False, 'error': error_msg})
     except Exception as kv_err:
