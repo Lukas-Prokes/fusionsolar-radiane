@@ -1,8 +1,19 @@
 import os
 import sys
 import json
+import ssl
 import requests
+import urllib3
 from fusion_solar_py.client import FusionSolarClient
+
+# Disable SSL verification globally to handle FusionSolar's self-signed cert
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+old_init = ssl.SSLContext.__init__
+def patched_init(self, *args, **kwargs):
+    old_init(self, *args, **kwargs)
+    self.check_hostname = False
+    self.verify_mode = ssl.CERT_NONE
+ssl.SSLContext.__init__ = patched_init
 
 HUAWEI_USER = os.environ['HUAWEI_USER']
 HUAWEI_PASS = os.environ['HUAWEI_PASS']
@@ -40,7 +51,7 @@ def delete_creds():
 
 
 try:
-    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION, verify_ssl=False)
+    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
     stations = client.get_station_list()
 
     # stationCode is required for get_station_real_kpi() calls
