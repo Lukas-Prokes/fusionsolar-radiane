@@ -1,19 +1,18 @@
 import json
 import os
-import ssl
 import requests
 import urllib3
 from datetime import datetime, timezone
 from fusion_solar_py.client import FusionSolarClient
 
-# Disable SSL verification globally to handle FusionSolar's self-signed cert
+# Disable SSL verification for FusionSolar's self-signed cert
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-old_init = ssl.SSLContext.__init__
-def patched_init(self, *args, **kwargs):
-    old_init(self, *args, **kwargs)
-    self.check_hostname = False
-    self.verify_mode = ssl.CERT_NONE
-ssl.SSLContext.__init__ = patched_init
+requests.packages.urllib3.disable_warnings()
+_original_request = requests.Session.request
+def _no_verify_request(self, method, url, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _original_request(self, method, url, **kwargs)
+requests.Session.request = _no_verify_request
 
 CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
 CF_KV_ID = os.environ['CF_KV_ID']
@@ -30,7 +29,7 @@ def kv_url(key):
 
 
 # Load sync jobs from KV
-resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers)
+resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
 if resp.status_code == 404 or not resp.text.strip():
     print('No sync jobs registered yet — nothing to do.')
     exit(0)
@@ -67,10 +66,10 @@ for job in jobs:
             kv_url(kv_key),
             data=json.dumps(data_to_send),
             headers={**cf_headers, 'Content-Type': 'application/json'},
+            verify=True,
         ).raise_for_status()
 
         print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
     except Exception as e:
         print(f'Error syncing station={station_id}: {e}')
-        # Continue with remaining jobs
