@@ -13,7 +13,9 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Install dependencies
-        run: uv pip install fusion-solar-py requests --system --quiet
+        run: |
+          curl -Ls https://astral.sh/uv/install.sh | sh
+          ~/.local/bin/uv pip install fusion-solar-py requests --system --quiet
 
       - name: Discover plants
         env:
