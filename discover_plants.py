@@ -40,7 +40,7 @@ def delete_creds():
 
 
 try:
-    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
+    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION, verify_ssl=False)
     stations = client.get_station_list()
 
     # stationCode is required for get_station_real_kpi() calls
