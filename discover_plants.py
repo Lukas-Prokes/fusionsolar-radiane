@@ -1,8 +1,8 @@
-import os
-import sys
 import json
+import os
 import requests
 import urllib3
+from datetime import datetime, timezone
 from fusion_solar_py.client import FusionSolarClient
 
 # Disable SSL verification for FusionSolar's self-signed cert
@@ -14,14 +14,11 @@ def _no_verify_request(self, method, url, **kwargs):
     return _original_request(self, method, url, **kwargs)
 requests.Session.request = _no_verify_request
 
-HUAWEI_USER = os.environ['HUAWEI_USER']
-HUAWEI_PASS = os.environ['HUAWEI_PASS']
-HUAWEI_REGION = os.environ.get('HUAWEI_REGION', 'uni002eu5')
-JOB_ID = os.environ['JOB_ID']
-
 CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
 CF_KV_ID = os.environ['CF_KV_ID']
 CF_TOKEN = os.environ['CF_TOKEN']
+
+cf_headers = {'Authorization': f'Bearer {CF_TOKEN}'}
 
 
 def kv_url(key):
@@ -31,52 +28,48 @@ def kv_url(key):
     )
 
 
-def write_kv(key, payload):
-    requests.put(
-        kv_url(key),
-        data=json.dumps(payload),
-        headers={'Authorization': f'Bearer {CF_TOKEN}', 'Content-Type': 'application/json'},
-        verify=True,  # Cloudflare has a valid cert
-    ).raise_for_status()
+# Load sync jobs from KV
+resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
+if resp.status_code == 404 or not resp.text.strip():
+    print('No sync jobs registered yet — nothing to do.')
+    exit(0)
 
+jobs = json.loads(resp.text)
+print(f'Found {len(jobs)} sync job(s)')
 
-def delete_creds():
+for job in jobs:
+    username = job['username']
+    password = job['password']
+    region = job.get('region', 'uni002eu5')
+    station_id = job['stationId']
+    kv_key = f'SOLAR_LIVE_{station_id}'
+
     try:
-        requests.delete(
-            kv_url(f'DISCOVER_CREDS_{JOB_ID}'),
-            headers={'Authorization': f'Bearer {CF_TOKEN}'},
-            verify=True,
-        )
-    except Exception:
-        pass
+        client = FusionSolarClient(username, password, huawei_subdomain=region)
+        kpi = client.get_station_real_kpi(station_code=station_id)
 
+        # storage_charge_discharge_power: positive = charging, negative = discharging
+        batt_raw = kpi.get('storage_charge_discharge_power', 0) or 0
 
-try:
-    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
-    stations = client.get_station_list()
-
-    plants = [
-        {
-            'id': s['stationCode'],
-            'name': s.get('stationName', 'Unknown Plant'),
-            'capacity': s.get('capacity', None),
-            'location': s.get('stationAddr', s.get('address', None)),
+        data_to_send = {
+            'solar_power': kpi.get('radiation_intensity', 0) or 0,
+            'battery_soc': kpi.get('storage_state_of_charge', 0) or 0,
+            'battery_charge': max(0.0, batt_raw),
+            'battery_discharge': max(0.0, -batt_raw),
+            'consumption': kpi.get('inverter_power', kpi.get('use_power', 0)) or 0,
+            'grid_export': kpi.get('grid_power', 0) or 0,
+            'synced_at': datetime.now(timezone.utc).isoformat(),
+            'raw': kpi,
         }
-        for s in stations
-        if s.get('stationCode')
-    ]
 
-    write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': True, 'plants': plants})
-    print(f'Stored {len(plants)} plants for job {JOB_ID}')
+        requests.put(
+            kv_url(kv_key),
+            data=json.dumps(data_to_send),
+            headers={**cf_headers, 'Content-Type': 'application/json'},
+            verify=True,
+        ).raise_for_status()
 
-except Exception as e:
-    error_msg = str(e)
-    print(f'ERROR: {error_msg}', file=sys.stderr)
-    try:
-        write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': False, 'error': error_msg})
-    except Exception as kv_err:
-        print(f'ERROR writing failure to KV: {kv_err}', file=sys.stderr)
-    sys.exit(1)
+        print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
-finally:
-    delete_creds()
+    except Exception as e:
+        print(f'Error syncing station={station_id}: {e}')
