@@ -47,7 +47,7 @@ jobs:
               plants = [
                   {'id': str(x.get('stationCode') or x.get('dnId') or x.get('dn')),
                    'name': x.get('stationName') or x.get('name', 'Unknown'),
-                   'capacity': x.get('capacity') or x.get('installedCapacity'),
+                   'capacity': x.get('capacity') or x.get('onlyInverterPower') or x.get('installedCapacity'),
                    'location': x.get('stationAddr') or x.get('plantAddress')}
                   for x in stations if x.get('stationCode') or x.get('dnId') or x.get('dn')
               ]
