@@ -35,16 +35,19 @@ for job in jobs:
     kv_key = f'SOLAR_LIVE_{station_id}'
 
     try:
-        client = FusionSolarClient(username, password, huawei_subdomain=region)
+        client = FusionSolarClient(username, password, huawei_subdomain=region, verify_ssl=False)
         kpi = client.get_station_real_kpi(station_code=station_id)
 
+        # storage_charge_discharge_power: positive = charging, negative = discharging
+        batt_raw = kpi.get('storage_charge_discharge_power', 0) or 0
+
         data_to_send = {
-            'solar_power': kpi.get('radiation_intensity', 0),
-            'battery_soc': kpi.get('storage_state_of_charge', 0),
-            'battery_power': kpi.get('storage_charge_discharge_power', 0),
-            'grid_power': kpi.get('grid_purchased_power', 0),
-            'consumption': kpi.get('inverter_power', kpi.get('use_power', 0)),
-            'grid_export': kpi.get('grid_power', 0),
+            'solar_power': kpi.get('radiation_intensity', 0) or 0,
+            'battery_soc': kpi.get('storage_state_of_charge', 0) or 0,
+            'battery_charge': max(0.0, batt_raw),
+            'battery_discharge': max(0.0, -batt_raw),
+            'consumption': kpi.get('inverter_power', kpi.get('use_power', 0)) or 0,
+            'grid_export': kpi.get('grid_power', 0) or 0,
             'synced_at': datetime.now(timezone.utc).isoformat(),
             'raw': kpi,
         }
