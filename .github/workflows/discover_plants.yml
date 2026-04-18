@@ -43,6 +43,7 @@ jobs:
 
               client = FusionSolarClient(c['username'], c['password'], huawei_subdomain=c.get('region', 'uni002eu5'))
               stations = client.get_station_list()
+              print(f"Raw stations ({len(stations)}): {stations}")
               plants = [
                   {'id': x['stationCode'], 'name': x.get('stationName', 'Unknown'),
                    'capacity': x.get('capacity'), 'location': x.get('stationAddr')}
