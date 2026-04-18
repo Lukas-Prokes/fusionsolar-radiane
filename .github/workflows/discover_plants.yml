@@ -45,13 +45,15 @@ jobs:
               stations = client.get_station_list()
               print(f"Raw stations ({len(stations)}): {stations}")
               plants = [
-                  {'id': x['stationCode'], 'name': x.get('stationName', 'Unknown'),
-                   'capacity': x.get('capacity'), 'location': x.get('stationAddr')}
-                  for x in stations if x.get('stationCode')
+                  {'id': str(x.get('stationCode') or x.get('dnId') or x.get('dn')),
+                   'name': x.get('stationName') or x.get('name', 'Unknown'),
+                   'capacity': x.get('capacity') or x.get('installedCapacity'),
+                   'location': x.get('stationAddr') or x.get('plantAddress')}
+                  for x in stations if x.get('stationCode') or x.get('dnId') or x.get('dn')
               ]
               s.put(f"{base}/PLANT_DISCOVERY_{jid}",
                     json={'success': True, 'plants': plants}, verify=True)
-              print(f"Stored {len(plants)} plants for job {jid}")
+              print(f"Stored {len(plants)} plants for job {jid}: {[p['id'] for p in plants]}")
 
           except Exception as e:
               print(f"Error: {e}", file=sys.stderr)
