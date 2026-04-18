@@ -3,90 +3,66 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: 'Discovery job ID (set by Cloudflare Worker)'
         required: true
         type: string
 
 jobs:
   discover:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
     steps:
-      - name: Install dependencies
-        run: |
-          curl -Ls https://astral.sh/uv/install.sh | sh
-          ~/.local/bin/uv pip install fusion-solar-py requests --system --quiet
-
-      - name: Discover plants
+      - name: Execute Discovery
         env:
           JOB_ID: ${{ github.event.inputs.job_id }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
         run: |
-          HTTP_STATUS=$(curl -s -o /tmp/creds.json -w "%{http_code}" \
-            -H "Authorization: Bearer $CF_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values/DISCOVER_CREDS_$JOB_ID")
-          echo "KV fetch status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "200" ]; then echo "ERROR: KV fetch failed ($HTTP_STATUS)" >&2; exit 1; fi
-          export HUAWEI_USER=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d['username'])")
-          export HUAWEI_PASS=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d['password'])")
-          export HUAWEI_REGION=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d.get('region','uni002eu5'))")
+          pip install fusion-solar-py requests --quiet --no-cache-dir --break-system-packages
           python3 - << 'PYEOF'
-          import os, sys, json, requests, urllib3
+          import os, sys, requests, urllib3
           from fusion_solar_py.client import FusionSolarClient
 
-          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-          requests.packages.urllib3.disable_warnings()
+          urllib3.disable_warnings()
           _orig = requests.Session.request
           def _no_verify(self, method, url, **kwargs):
               kwargs.setdefault('verify', False)
               return _orig(self, method, url, **kwargs)
           requests.Session.request = _no_verify
 
-          HUAWEI_USER   = os.environ['HUAWEI_USER']
-          HUAWEI_PASS   = os.environ['HUAWEI_PASS']
-          HUAWEI_REGION = os.environ.get('HUAWEI_REGION', 'uni002eu5')
-          JOB_ID        = os.environ['JOB_ID']
-          CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
-          CF_KV_ID      = os.environ['CF_KV_ID']
-          CF_TOKEN      = os.environ['CF_TOKEN']
-
-          def kv_url(key):
-              return (f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}'
-                      f'/storage/kv/namespaces/{CF_KV_ID}/values/{key}')
-
-          def write_kv(key, payload):
-              requests.put(kv_url(key), data=json.dumps(payload),
-                  headers={'Authorization': f'Bearer {CF_TOKEN}', 'Content-Type': 'application/json'},
-                  verify=True).raise_for_status()
-
-          def delete_creds():
-              try:
-                  requests.delete(kv_url(f'DISCOVER_CREDS_{JOB_ID}'),
-                      headers={'Authorization': f'Bearer {CF_TOKEN}'}, verify=True)
-              except Exception:
-                  pass
+          jid   = os.environ['JOB_ID']
+          base  = (f"https://api.cloudflare.com/client/v4/accounts/{os.environ['CF_ACCOUNT_ID']}"
+                   f"/storage/kv/namespaces/{os.environ['CF_KV_ID']}/values")
+          s = requests.Session()
+          s.headers.update({'Authorization': f"Bearer {os.environ['CF_TOKEN']}"})
 
           try:
-              client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
+              r = s.get(f"{base}/DISCOVER_CREDS_{jid}", verify=True)
+              r.raise_for_status()
+              c = r.json()
+
+              client = FusionSolarClient(c['username'], c['password'], huawei_subdomain=c.get('region', 'uni002eu5'))
               stations = client.get_station_list()
               plants = [
-                  {'id': s['stationCode'], 'name': s.get('stationName', 'Unknown Plant'),
-                   'capacity': s.get('capacity', None),
-                   'location': s.get('stationAddr', s.get('address', None))}
-                  for s in stations if s.get('stationCode')
+                  {'id': x['stationCode'], 'name': x.get('stationName', 'Unknown'),
+                   'capacity': x.get('capacity'), 'location': x.get('stationAddr')}
+                  for x in stations if x.get('stationCode')
               ]
-              write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': True, 'plants': plants})
-              print(f'Stored {len(plants)} plants for job {JOB_ID}')
+              s.put(f"{base}/PLANT_DISCOVERY_{jid}",
+                    json={'success': True, 'plants': plants}, verify=True)
+              print(f"Stored {len(plants)} plants for job {jid}")
+
           except Exception as e:
-              error_msg = str(e)
-              print(f'ERROR: {error_msg}', file=sys.stderr)
+              print(f"Error: {e}", file=sys.stderr)
               try:
-                  write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': False, 'error': error_msg})
+                  s.put(f"{base}/PLANT_DISCOVERY_{jid}",
+                        json={'success': False, 'error': str(e)}, verify=True)
               except Exception as kv_err:
-                  print(f'ERROR writing failure to KV: {kv_err}', file=sys.stderr)
+                  print(f"KV write failed: {kv_err}", file=sys.stderr)
               sys.exit(1)
           finally:
-              delete_creds()
+              try:
+                  s.delete(f"{base}/DISCOVER_CREDS_{jid}", verify=True)
+              except Exception:
+                  pass
           PYEOF
