@@ -1,8 +1,19 @@
 import json
 import os
+import ssl
 import requests
+import urllib3
 from datetime import datetime, timezone
 from fusion_solar_py.client import FusionSolarClient
+
+# Disable SSL verification globally to handle FusionSolar's self-signed cert
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+old_init = ssl.SSLContext.__init__
+def patched_init(self, *args, **kwargs):
+    old_init(self, *args, **kwargs)
+    self.check_hostname = False
+    self.verify_mode = ssl.CERT_NONE
+ssl.SSLContext.__init__ = patched_init
 
 CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
 CF_KV_ID = os.environ['CF_KV_ID']
@@ -35,7 +46,7 @@ for job in jobs:
     kv_key = f'SOLAR_LIVE_{station_id}'
 
     try:
-        client = FusionSolarClient(username, password, huawei_subdomain=region, verify_ssl=False)
+        client = FusionSolarClient(username, password, huawei_subdomain=region)
         kpi = client.get_station_real_kpi(station_code=station_id)
 
         # storage_charge_discharge_power: positive = charging, negative = discharging
