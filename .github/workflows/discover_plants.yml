@@ -7,79 +7,33 @@ on:
         required: true
         type: string
 
-
 jobs:
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Install fusion-solar-py
-        run: pip install fusion-solar-py --quiet
+      - uses: actions/checkout@v4
 
-      - name: Discover plants
+      - name: Install dependencies
+        run: pip install fusion-solar-py requests --quiet
+
+      - name: Fetch credentials and discover plants
         env:
           JOB_ID: ${{ github.event.inputs.job_id }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
         run: |
-          echo "Fetching creds for job $JOB_ID"
           HTTP_STATUS=$(curl -s -o /tmp/creds.json -w "%{http_code}" \
             -H "Authorization: Bearer $CF_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values/DISCOVER_CREDS_$JOB_ID")
-          echo "HTTP status: $HTTP_STATUS"
-          echo "Response: $(cat /tmp/creds.json)"
+          echo "KV fetch status: $HTTP_STATUS"
+          cat /tmp/creds.json
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "ERROR: KV fetch failed with status $HTTP_STATUS" >&2
+            echo "ERROR: KV fetch failed" >&2
             exit 1
           fi
-          CREDS=$(cat /tmp/creds.json)
-          export HUAWEI_USER=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['username'])")
-          export HUAWEI_PASS=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['password'])")
-          export HUAWEI_REGION=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('region','uni002eu5'))")
-
-          python3 - <<'PYEOF'
-import os, sys, json, requests
-from fusion_solar_py.client import FusionSolarClient
-
-HUAWEI_USER = os.environ['HUAWEI_USER']
-HUAWEI_PASS = os.environ['HUAWEI_PASS']
-HUAWEI_REGION = os.environ.get('HUAWEI_REGION', 'uni002eu5')
-JOB_ID = os.environ['JOB_ID']
-CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
-CF_KV_ID = os.environ['CF_KV_ID']
-CF_TOKEN = os.environ['CF_TOKEN']
-
-def kv_url(key):
-    return f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_ID}/values/{key}'
-
-def write_kv(key, payload):
-    requests.put(kv_url(key), data=json.dumps(payload),
-                 headers={'Authorization': f'Bearer {CF_TOKEN}', 'Content-Type': 'application/json'}).raise_for_status()
-
-def delete_creds():
-    try:
-        requests.delete(kv_url(f'DISCOVER_CREDS_{JOB_ID}'), headers={'Authorization': f'Bearer {CF_TOKEN}'})
-    except Exception:
-        pass
-
-try:
-    client = FusionSolarClient(HUAWEI_USER, HUAWEI_PASS, huawei_subdomain=HUAWEI_REGION)
-    stations = client.get_station_list()
-    plants = [
-        {'id': s['stationCode'], 'name': s.get('stationName', 'Unknown Plant'),
-         'capacity': s.get('capacity', None), 'location': s.get('stationAddr', s.get('address', None))}
-        for s in stations if s.get('stationCode')
-    ]
-    write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': True, 'plants': plants})
-    print(f'Stored {len(plants)} plants for job {JOB_ID}')
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    try:
-        write_kv(f'PLANT_DISCOVERY_{JOB_ID}', {'success': False, 'error': str(e)})
-    except Exception as kv_err:
-        print(f'ERROR writing failure to KV: {kv_err}', file=sys.stderr)
-    sys.exit(1)
-finally:
-    delete_creds()
-PYEOF
+          export HUAWEI_USER=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d['username'])")
+          export HUAWEI_PASS=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d['password'])")
+          export HUAWEI_REGION=$(python3 -c "import json; d=json.load(open('/tmp/creds.json')); print(d.get('region','uni002eu5'))")
+          python3 discover_plants.py
