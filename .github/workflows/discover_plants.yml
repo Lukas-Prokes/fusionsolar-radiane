@@ -24,8 +24,12 @@ jobs:
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
         run: |
-          CREDS=$(curl -sf -H "Authorization: Bearer $CF_TOKEN" \
+          CREDS=$(curl -s -f -H "Authorization: Bearer $CF_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces/$CF_KV_ID/values/DISCOVER_CREDS_$JOB_ID")
+          if [ -z "$CREDS" ]; then
+            echo "ERROR: DISCOVER_CREDS_$JOB_ID not found in KV" >&2
+            exit 1
+          fi
           export HUAWEI_USER=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['username'])")
           export HUAWEI_PASS=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['password'])")
           export HUAWEI_REGION=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('region','uni002eu5'))")
