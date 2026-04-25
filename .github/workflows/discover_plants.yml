@@ -20,7 +20,7 @@ jobs:
         run: |
           pip install fusion-solar-py requests --quiet --no-cache-dir --break-system-packages
           python3 - << 'PYEOF'
-          import os, sys, requests, urllib3
+          import json, os, sys, requests, urllib3
           from fusion_solar_py.client import FusionSolarClient
 
           urllib3.disable_warnings()
@@ -36,30 +36,50 @@ jobs:
           s = requests.Session()
           s.headers.update({'Authorization': f"Bearer {os.environ['CF_TOKEN']}"})
 
+          def kv_write(key, payload):
+              """Write to KV and raise immediately if the write fails."""
+              r = s.put(f"{base}/{key}", json=payload, verify=True)
+              r.raise_for_status()
+
           try:
+              # Fetch temporary credentials stored by the Worker.
               r = s.get(f"{base}/DISCOVER_CREDS_{jid}", verify=True)
               r.raise_for_status()
-              c = r.json()
 
-              client = FusionSolarClient(c['username'], c['password'], huawei_subdomain=c.get('region', 'uni002eu5'))
-              stations = client.get_station_list()
+              # Guard against 200 with empty body (edge case on CF edge network).
+              raw = r.text.strip()
+              if not raw:
+                  raise ValueError(f"DISCOVER_CREDS_{jid} returned 200 but empty body — TTL may have expired")
+
+              try:
+                  c = json.loads(raw)
+              except json.JSONDecodeError as e:
+                  raise ValueError(f"DISCOVER_CREDS_{jid} is not valid JSON: {e}. Body: {raw[:200]}")
+
+              try:
+                  client = FusionSolarClient(c['username'], c['password'], huawei_subdomain=c.get('region', 'uni002eu5'))
+                  stations = client.get_station_list()
+              except json.JSONDecodeError as e:
+                  raise RuntimeError(
+                      f"FusionSolar API returned non-JSON (rate-limited or IP blocked): {e}"
+                  )
+
               print(f"Raw stations ({len(stations)}): {stations}")
               plants = [
                   {'id': str(x.get('stationCode') or x.get('dnId') or x.get('dn')),
                    'name': x.get('stationName') or x.get('name', 'Unknown'),
-                   'capacity': x.get('capacity') or x.get('onlyInverterPower') or x.get('installedCapacity'),
+                   'capacity': x.get('capacity') or x.get('onlyInverterPower') or x.get('installedCapacity') or x.get('batteryCapacity'),
                    'location': x.get('stationAddr') or x.get('plantAddress')}
                   for x in stations if x.get('stationCode') or x.get('dnId') or x.get('dn')
               ]
-              s.put(f"{base}/PLANT_DISCOVERY_{jid}",
-                    json={'success': True, 'plants': plants}, verify=True)
+
+              kv_write(f"PLANT_DISCOVERY_{jid}", {'success': True, 'plants': plants})
               print(f"Stored {len(plants)} plants for job {jid}: {[p['id'] for p in plants]}")
 
           except Exception as e:
               print(f"Error: {e}", file=sys.stderr)
               try:
-                  s.put(f"{base}/PLANT_DISCOVERY_{jid}",
-                        json={'success': False, 'error': str(e)}, verify=True)
+                  kv_write(f"PLANT_DISCOVERY_{jid}", {'success': False, 'error': str(e)})
               except Exception as kv_err:
                   print(f"KV write failed: {kv_err}", file=sys.stderr)
               sys.exit(1)
