@@ -1,7 +1,7 @@
 name: 24-7 Solar Sync
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: pip install fusion-solar-py requests --quiet
+        run: pip install fusion-solar-py requests --quiet --no-cache-dir --break-system-packages
 
       - name: Run sync
         env:
