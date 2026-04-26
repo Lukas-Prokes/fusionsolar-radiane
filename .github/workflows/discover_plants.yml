@@ -11,6 +11,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-fusionsolar-v1
+
       - name: Execute Discovery
         env:
           JOB_ID: ${{ github.event.inputs.job_id }}
@@ -18,7 +24,7 @@ jobs:
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
         run: |
-          pip install fusion-solar-py requests --quiet --no-cache-dir --break-system-packages
+          pip install fusion-solar-py requests --quiet --break-system-packages
           python3 - << 'PYEOF'
           import json, os, sys, requests, urllib3
           from fusion_solar_py.client import FusionSolarClient
