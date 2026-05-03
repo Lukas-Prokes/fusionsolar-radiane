@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import requests
 import urllib3
 from datetime import datetime, timezone
@@ -28,13 +29,50 @@ def kv_url(key):
     )
 
 
-# Load sync jobs from KV
+# Load sync jobs from KV — guard against all HTTP error codes, not just 404.
 resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
-if resp.status_code == 404 or not resp.text.strip():
-    print('No sync jobs registered yet — nothing to do.')
-    exit(0)
 
-jobs = json.loads(resp.text)
+if resp.status_code == 404:
+    print('No sync jobs registered yet — nothing to do.')
+    sys.exit(0)
+
+if not resp.ok:
+    # Non-404 failure (e.g. 401 bad token, 403 forbidden, 500 server error).
+    # Treat as transient and exit cleanly so GitHub does not mark the run red
+    # unless it happens consistently.
+    print(
+        f'KV read for SYNC_JOBS failed ({resp.status_code}): '
+        f'{resp.text[:300]}',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+raw_body = resp.text.strip()
+if not raw_body:
+    print('SYNC_JOBS key exists but is empty — nothing to do.')
+    sys.exit(0)
+
+try:
+    jobs = json.loads(raw_body)
+except json.JSONDecodeError as e:
+    # Cloudflare returned something that is not valid JSON.  Log the raw body
+    # so we can see whether it was an HTML error page or garbage.
+    print(
+        f'SYNC_JOBS is not valid JSON: {e}\n'
+        f'Raw body (first 300 chars): {raw_body[:300]}',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if not isinstance(jobs, list):
+    # Cloudflare API error responses are dicts, not lists.
+    print(
+        f'SYNC_JOBS parsed to {type(jobs).__name__} instead of list — '
+        f'possible Cloudflare API error: {raw_body[:300]}',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 print(f'Found {len(jobs)} sync job(s)')
 
 for job in jobs:
@@ -51,25 +89,53 @@ for job in jobs:
         # storage_charge_discharge_power: positive = charging, negative = discharging
         batt_raw = kpi.get('storage_charge_discharge_power', 0) or 0
 
+        # inverter_power is the AC generation output from the inverter (kW).
+        # radiation_intensity is solar irradiance (W/m²) — not the same thing.
+        solar_kw = kpi.get('inverter_power', kpi.get('activePower', kpi.get('active_power', 0))) or 0
+        # use_power is the site consumption (load).
+        consumption_kw = kpi.get('use_power', kpi.get('inverter_power', 0)) or 0
+
+        # Battery SOC — try every field name FusionSolar uses across firmware versions.
+        # Store None (JSON null) when absent so the app knows there is no battery,
+        # rather than defaulting to 0 which looks like a dead battery.
+        _soc_raw = (
+            kpi.get('storage_state_of_charge')
+            or kpi.get('batteryStateOfCharge')
+            or kpi.get('battery_soc')
+            or kpi.get('ess_soc')
+        )
+        battery_soc = float(_soc_raw) if _soc_raw is not None and float(_soc_raw) > 0 else None
+
         data_to_send = {
-            'solar_power': kpi.get('radiation_intensity', 0) or 0,
-            'battery_soc': kpi.get('storage_state_of_charge', 0) or 0,
+            'solar_power': solar_kw,
+            'battery_soc': battery_soc,
             'battery_charge': max(0.0, batt_raw),
             'battery_discharge': max(0.0, -batt_raw),
-            'consumption': kpi.get('inverter_power', kpi.get('use_power', 0)) or 0,
+            'consumption': consumption_kw,
             'grid_export': kpi.get('grid_power', 0) or 0,
             'synced_at': datetime.now(timezone.utc).isoformat(),
             'raw': kpi,
         }
 
-        requests.put(
+        put_resp = requests.put(
             kv_url(kv_key),
             data=json.dumps(data_to_send),
             headers={**cf_headers, 'Content-Type': 'application/json'},
             verify=True,
-        ).raise_for_status()
+        )
+        put_resp.raise_for_status()
 
         print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
+    except json.JSONDecodeError as e:
+        # FusionSolar returned an HTML error page instead of JSON.
+        # This usually means the runner IP is rate-limited or temporarily blocked.
+        # Print to stderr so GitHub marks the step as failed.
+        print(
+            f'FusionSolar returned non-JSON for station={station_id} '
+            f'(likely rate-limited or IP blocked): {e}',
+            file=sys.stderr,
+        )
+
     except Exception as e:
-        print(f'Error syncing station={station_id}: {e}')
+        print(f'Error syncing station={station_id}: {e}', file=sys.stderr)
