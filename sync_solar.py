@@ -29,6 +29,63 @@ def kv_url(key):
     )
 
 
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def status_key(station_id):
+    return f'FUSIONSOLAR_SYNC_STATUS_{station_id}'
+
+
+def read_status(station_id):
+    resp = requests.get(kv_url(status_key(station_id)), headers=cf_headers, verify=True)
+    if resp.status_code == 404:
+        return {}
+    resp.raise_for_status()
+    raw = resp.text.strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f'Invalid FusionSolar status JSON for station={station_id}: {e}')
+    if not isinstance(data, dict):
+        raise ValueError(f'FusionSolar status for station={station_id} is not an object')
+    return data
+
+
+def write_status(station_id, updates):
+    current = {}
+    try:
+        current = read_status(station_id)
+    except Exception as e:
+        print(f'Could not read existing status for station={station_id}: {e}', file=sys.stderr)
+    payload = {
+        **current,
+        **updates,
+        'stationId': station_id,
+        'updatedAt': now_iso(),
+    }
+    if not payload.get('registeredAt'):
+        payload['registeredAt'] = current.get('registeredAt') or updates.get('registeredAt') or now_iso()
+    resp = requests.put(
+        kv_url(status_key(station_id)),
+        data=json.dumps(payload),
+        headers={**cf_headers, 'Content-Type': 'application/json'},
+        verify=True,
+    )
+    resp.raise_for_status()
+    return payload
+
+
+def mark_status(station_id, updates):
+    try:
+        return write_status(station_id, updates)
+    except Exception as e:
+        print(f'Failed to update FusionSolar status for station={station_id}: {e}', file=sys.stderr)
+        return None
+
+
 # Load sync jobs from KV — guard against all HTTP error codes, not just 404.
 resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
 
@@ -83,8 +140,30 @@ for job in jobs:
     kv_key = f'SOLAR_LIVE_{station_id}'
 
     try:
+        mark_status(station_id, {
+            'lastAttemptAt': now_iso(),
+            'lastStage': 'fetching_kpi',
+            'lastErrorAt': None,
+            'lastErrorMessage': None,
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
         kpi = client.get_station_real_kpi(station_code=station_id)
+        mark_status(station_id, {
+            'lastStage': 'kpi_fetched',
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
+
+        if not isinstance(kpi, dict) or not kpi:
+            raise ValueError('FusionSolar KPI response was empty or malformed')
 
         # storage_charge_discharge_power: positive = charging, negative = discharging
         batt_raw = kpi.get('storage_charge_discharge_power', 0) or 0
@@ -124,6 +203,17 @@ for job in jobs:
             verify=True,
         )
         put_resp.raise_for_status()
+        mark_status(station_id, {
+            'lastStage': 'live_data_written',
+            'lastSuccessAt': now_iso(),
+            'lastErrorAt': None,
+            'lastErrorMessage': None,
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
 
         print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
@@ -131,6 +221,17 @@ for job in jobs:
         # FusionSolar returned an HTML error page instead of JSON.
         # This usually means the runner IP is rate-limited or temporarily blocked.
         # Print to stderr so GitHub marks the step as failed.
+        mark_status(station_id, {
+            'lastStage': 'failed',
+            'lastAttemptAt': now_iso(),
+            'lastErrorAt': now_iso(),
+            'lastErrorMessage': f'FusionSolar returned non-JSON: {e}',
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
         print(
             f'FusionSolar returned non-JSON for station={station_id} '
             f'(likely rate-limited or IP blocked): {e}',
@@ -138,4 +239,15 @@ for job in jobs:
         )
 
     except Exception as e:
+        mark_status(station_id, {
+            'lastStage': 'failed',
+            'lastAttemptAt': now_iso(),
+            'lastErrorAt': now_iso(),
+            'lastErrorMessage': str(e),
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
         print(f'Error syncing station={station_id}: {e}', file=sys.stderr)
