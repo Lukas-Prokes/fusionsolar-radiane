@@ -138,6 +138,7 @@ for job in jobs:
     region = job.get('region', 'uni002eu5')
     station_id = job['stationId']
     kv_key = f'SOLAR_LIVE_{station_id}'
+    legacy_kv_key = 'SOLAR_LIVE'
 
     try:
         mark_status(station_id, {
@@ -203,7 +204,15 @@ for job in jobs:
             verify=True,
         )
         put_resp.raise_for_status()
-        mark_status(station_id, {
+        legacy_put_resp = requests.put(
+            kv_url(legacy_kv_key),
+            data=json.dumps(data_to_send),
+            headers={**cf_headers, 'Content-Type': 'application/json'},
+            verify=True,
+        )
+        legacy_put_resp.raise_for_status()
+
+        status_result = mark_status(station_id, {
             'lastStage': 'live_data_written',
             'lastSuccessAt': now_iso(),
             'lastErrorAt': None,
@@ -214,6 +223,8 @@ for job in jobs:
             'stationName': job.get('stationName'),
             'region': region,
         })
+        if status_result is None:
+            raise RuntimeError(f'FusionSolar live data was written but status update failed for station={station_id}')
 
         print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
