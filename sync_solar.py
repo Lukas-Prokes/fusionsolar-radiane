@@ -145,6 +145,21 @@ def resolve_plant_id(client, station_id):
     )
 
 
+def pick_number(payload, keys):
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return None
+
+
 # Load sync jobs from KV — guard against all HTTP error codes, not just 404.
 resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
 
@@ -235,14 +250,44 @@ for job in jobs:
         if not isinstance(kpi, dict) or not kpi:
             raise ValueError('FusionSolar KPI response was empty or malformed')
 
+        # currentPower is the live plant production value exposed by FusionSolar.
+        # Keep older aliases for plants/firmware that expose different names.
+        solar_kw = pick_number(kpi, [
+            'currentPower',
+            'current_power',
+            'inverter_power',
+            'activePower',
+            'active_power',
+        ])
+        # use_power/load_power are the site consumption (load).
+        consumption_kw = pick_number(kpi, [
+            'use_power',
+            'load_power',
+            'loadPower',
+            'consumption',
+        ])
         # storage_charge_discharge_power: positive = charging, negative = discharging
-        batt_raw = kpi.get('storage_charge_discharge_power', 0) or 0
+        batt_raw = pick_number(kpi, [
+            'storage_charge_discharge_power',
+            'storageChargeDischargePower',
+            'battery_power',
+            'batteryPower',
+        ])
+        grid_export = pick_number(kpi, [
+            'grid_export',
+            'grid_power',
+            'gridPower',
+            'pgrid',
+        ])
 
-        # inverter_power is the AC generation output from the inverter (kW).
-        # radiation_intensity is solar irradiance (W/m²) — not the same thing.
-        solar_kw = kpi.get('inverter_power', kpi.get('activePower', kpi.get('active_power', 0))) or 0
-        # use_power is the site consumption (load).
-        consumption_kw = kpi.get('use_power', kpi.get('inverter_power', 0)) or 0
+        if solar_kw is None:
+            solar_kw = 0.0
+        if consumption_kw is None:
+            consumption_kw = 0.0
+        if batt_raw is None:
+            batt_raw = 0.0
+        if grid_export is None:
+            grid_export = 0.0
 
         # Battery SOC — try every field name FusionSolar uses across firmware versions.
         # Store None (JSON null) when absent so the app knows there is no battery,
@@ -257,11 +302,13 @@ for job in jobs:
 
         data_to_send = {
             'solar_power': solar_kw,
+            'realTimePower': solar_kw,
             'battery_soc': battery_soc,
             'battery_charge': max(0.0, batt_raw),
             'battery_discharge': max(0.0, -batt_raw),
             'consumption': consumption_kw,
-            'grid_export': kpi.get('grid_power', 0) or 0,
+            'grid_export': grid_export,
+            'grid_import': max(0.0, consumption_kw + max(0.0, batt_raw) + grid_export - solar_kw - max(0.0, -batt_raw)),
             'synced_at': datetime.now(timezone.utc).isoformat(),
             'raw': kpi,
         }
