@@ -166,7 +166,7 @@ for job in jobs:
             'region': region,
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
-        kpi = client.get_station_real_kpi(station_code=station_id)
+        kpi = client.get_current_plant_data(station_id)
         mark_status(station_id, {
             'lastStage': 'kpi_fetched',
             'jobId': job.get('jobId'),
