@@ -234,6 +234,15 @@ for job in jobs:
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
         resolved_plant_id = job.get('resolvedPlantId') or job.get('plantId') or station_id
+        print(f'Calling get_plant_flow with resolvedPlantId={resolved_plant_id}')
+        mark_status(station_id, {
+            'resolvedPlantId': resolved_plant_id,
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
         flow_data = client.get_plant_flow(resolved_plant_id)
         kpi = flow_data if isinstance(flow_data, dict) and flow_data else client.get_current_plant_data(resolved_plant_id)
         mark_status(station_id, {
