@@ -200,6 +200,7 @@ def node_text(node):
         node.get('description', {}).get('label') if isinstance(node.get('description'), dict) else None,
         node.get('deviceTips', {}).get('SOC') if isinstance(node.get('deviceTips'), dict) else None,
         node.get('deviceTips', {}).get('BATTERY_POWER') if isinstance(node.get('deviceTips'), dict) else None,
+        node.get('customAttr', {}).get('10006') if isinstance(node.get('customAttr'), dict) else None,
     ]
     return ' '.join(lower_text(part) for part in parts if part is not None)
 
@@ -246,6 +247,29 @@ def node_value(node):
         candidate = coerce_number(node['description'].get('value'))
         if candidate is not None:
             return candidate
+    return None
+
+
+def find_battery_node(flow_payload):
+    for node in flow_nodes(flow_payload):
+        if not isinstance(node, dict):
+            continue
+        hay = node_text(node)
+        device_tips = node.get('deviceTips') if isinstance(node.get('deviceTips'), dict) else {}
+        custom_attr = node.get('customAttr') if isinstance(node.get('customAttr'), dict) else {}
+        if (
+            'energy_store' in hay
+            or 'storage' in hay
+            or 'soc' in hay
+            or 'battery_power' in hay
+            or 'batterypower' in hay
+            or '10006' in custom_attr
+            or is_valid_plant_dn(device_tips.get('SOC'))
+            or is_valid_plant_dn(device_tips.get('BATTERY_POWER'))
+            or device_tips.get('SOC') is not None
+            or device_tips.get('BATTERY_POWER') is not None
+        ):
+            return node
     return None
 
 
@@ -395,7 +419,7 @@ for job in jobs:
         flow_payload = get_path_value(flow_source, ('data', 'flow')) or flow_source
 
         pv_node = find_node(flow_source, ['pv'])
-        battery_node = find_node(flow_source, ['energy_store', 'battery'])
+        battery_node = find_battery_node(flow_source)
         load_node = find_node(flow_source, ['electricalload'])
         grid_buy_link = find_link(flow_source, ['buy.power']) or find_link(flow_source, ['buy', 'power'])
         grid_sell_link = find_link(flow_source, ['sell.power']) or find_link(flow_source, ['sell', 'power'])
@@ -415,7 +439,8 @@ for job in jobs:
         battery_power = None
         if isinstance(battery_node, dict):
             device_tips = battery_node.get('deviceTips') if isinstance(battery_node.get('deviceTips'), dict) else {}
-            battery_soc = coerce_number(device_tips.get('SOC') or device_tips.get('soc'))
+            custom_attr = battery_node.get('customAttr') if isinstance(battery_node.get('customAttr'), dict) else {}
+            battery_soc = coerce_number(device_tips.get('SOC') or device_tips.get('soc') or custom_attr.get('10006'))
             battery_power = coerce_number(device_tips.get('BATTERY_POWER') or device_tips.get('batteryPower'))
             if battery_power is None:
                 battery_power = node_value(battery_node)
