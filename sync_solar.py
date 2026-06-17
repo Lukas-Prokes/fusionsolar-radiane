@@ -166,6 +166,56 @@ def pick_path_number(payload, paths):
     return None
 
 
+def is_valid_plant_dn(value):
+    return isinstance(value, str) and value.startswith('NE=')
+
+
+def _station_identifiers(station):
+    return {
+        'stationCode': station.get('stationCode'),
+        'dn': station.get('dn'),
+        'dnId': station.get('dnId'),
+        'stationDn': station.get('stationDn'),
+        'plantDn': station.get('plantDn'),
+    }
+
+
+def resolve_plant_id(client, job, station_id):
+    stored = job.get('resolvedPlantId')
+    if is_valid_plant_dn(stored):
+        return stored
+    if stored is not None:
+        print(f'Ignoring invalid resolvedPlantId={stored}; resolving from FusionSolar')
+
+    if is_valid_plant_dn(station_id):
+        return station_id
+
+    if station_id is not None and not is_valid_plant_dn(station_id):
+        print(f'Ignoring invalid resolvedPlantId={station_id}; resolving from FusionSolar')
+
+    plant_ids = client.get_plant_ids()
+    stations = client.get_station_list()
+
+    plant_id_candidates = [str(pid) for pid in plant_ids if is_valid_plant_dn(str(pid))]
+    station_id_str = str(station_id)
+
+    for station in stations or []:
+        if not isinstance(station, dict):
+            continue
+        if str(station.get('stationCode') or '') == station_id_str:
+            resolved = station.get('dn') or station.get('dnId') or station.get('stationDn') or station.get('plantDn')
+            if is_valid_plant_dn(resolved):
+                return resolved
+
+    if len(plant_id_candidates) == 1:
+        return plant_id_candidates[0]
+
+    raise ValueError(
+        f'Could not resolve FusionSolar plant DN for stationId={station_id_str}; '
+        f'plantIds={plant_id_candidates}; stationList={[ _station_identifiers(s) for s in stations if isinstance(s, dict) ]}'
+    )
+
+
 # Load sync jobs from KV — guard against all HTTP error codes, not just 404.
 resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
 
@@ -233,7 +283,7 @@ for job in jobs:
             'region': region,
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
-        resolved_plant_id = job.get('resolvedPlantId') or job.get('plantId') or station_id
+        resolved_plant_id = resolve_plant_id(client, job, station_id)
         print(f'Calling get_plant_flow with resolvedPlantId={resolved_plant_id}')
         mark_status(station_id, {
             'resolvedPlantId': resolved_plant_id,
