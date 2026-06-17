@@ -99,64 +99,70 @@ def mark_status(station_id, updates):
     return None
 
 
-def _debug_station_identifiers(stations):
-    return [
-        {
-            'stationCode': s.get('stationCode'),
-            'dn': s.get('dn') or s.get('stationDn') or s.get('plantDn'),
-            'stationName': s.get('stationName') or s.get('name'),
-        }
-        for s in stations
-        if isinstance(s, dict)
-    ]
-
-
-def resolve_plant_id(client, station_id):
-    stations = client.get_station_list()
-    plant_ids = client.get_plant_ids()
-
-    print(f'FusionSolar debug: SYNC_JOBS stationId={station_id}')
-    print(f'FusionSolar debug: get_plant_ids={plant_ids}')
-    print(f'FusionSolar debug: get_station_list identifiers={_debug_station_identifiers(stations)}')
-
-    station_id_str = str(station_id)
-    plant_id_candidates = [str(pid) for pid in plant_ids if pid is not None]
-    if station_id_str in plant_id_candidates:
-        return station_id_str
-
-    for station in stations:
-        if not isinstance(station, dict):
-            continue
-        station_code = str(station.get('stationCode') or '')
-        if station_code == station_id_str:
-            resolved = station.get('dn') or station.get('stationDn') or station.get('plantDn')
-            if resolved:
-                print(f'FusionSolar debug: mapped stationCode={station_id_str} -> plantId={resolved}')
-                return str(resolved)
-
-    if len(plant_id_candidates) == 1:
-        resolved = plant_id_candidates[0]
-        print(f'FusionSolar debug: fallback single plantId={resolved} for stationId={station_id_str}')
-        return resolved
-
-    raise ValueError(
-        f'Could not resolve FusionSolar plant id for stationId={station_id_str}; '
-        f'plantIds={plant_id_candidates}; stationList={_debug_station_identifiers(stations)}'
-    )
-
-
-def pick_number(payload, keys):
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
+def coerce_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
             return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
+        except ValueError:
+            return None
+    return None
+
+
+def get_path_value(payload, path):
+    current = payload
+    for part in path:
+        if isinstance(current, dict):
+            if part in current:
+                current = current[part]
                 continue
+            if isinstance(part, str):
+                matched = next(
+                    (key for key in current.keys() if isinstance(key, str) and key.lower() == part.lower()),
+                    None,
+                )
+                if matched is None:
+                    return None
+                current = current[matched]
+                continue
+            return None
+        if isinstance(current, list) and isinstance(part, int):
+            if part < 0 or part >= len(current):
+                return None
+            current = current[part]
+            continue
+        return None
+    return current
+
+
+def first_number_in(value):
+    number = coerce_number(value)
+    if number is not None:
+        return number
+    if isinstance(value, dict):
+        for key in ('value', 'power', 'currentPower', 'current_power', 'val', 'data'):
+            candidate = first_number_in(value.get(key))
+            if candidate is not None:
+                return candidate
+    if isinstance(value, list):
+        for item in value:
+            candidate = first_number_in(item)
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def pick_path_number(payload, paths):
+    for path in paths:
+        value = get_path_value(payload, path)
+        if value is None:
+            continue
+        candidate = first_number_in(value)
+        if candidate is not None:
+            return candidate
     return None
 
 
@@ -227,16 +233,8 @@ for job in jobs:
             'region': region,
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
-        plant_id = resolve_plant_id(client, station_id)
-        mark_status(station_id, {
-            'resolvedPlantId': plant_id,
-            'jobId': job.get('jobId'),
-            'householdId': job.get('householdId'),
-            'userId': job.get('userId'),
-            'stationName': job.get('stationName'),
-            'region': region,
-        })
-        kpi = client.get_current_plant_data(plant_id)
+        flow_data = client.get_plant_flow(plant_id)
+        kpi = flow_data if isinstance(flow_data, dict) and flow_data else client.get_current_plant_data(plant_id)
         mark_status(station_id, {
             'lastStage': 'kpi_fetched',
             'jobId': job.get('jobId'),
@@ -244,72 +242,109 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
-            'resolvedPlantId': plant_id,
         })
 
         if not isinstance(kpi, dict) or not kpi:
             raise ValueError('FusionSolar KPI response was empty or malformed')
 
-        # currentPower is the live plant production value exposed by FusionSolar.
-        # Keep older aliases for plants/firmware that expose different names.
-        solar_kw = pick_number(kpi, [
-            'currentPower',
-            'current_power',
-            'inverter_power',
-            'activePower',
-            'active_power',
+        # get_plant_flow exposes the most useful live values for Basalt.
+        # Positive BATTERY_POWER means charging in the observed flow balance.
+        solar_kw = pick_path_number(kpi, [
+            ('PV',),
+            ('pv',),
+            ('PV', 'value'),
+            ('PV', 'power'),
+            ('pv', 'value'),
+            ('pv', 'power'),
         ])
-        # use_power/load_power are the site consumption (load).
-        consumption_kw = pick_number(kpi, [
-            'use_power',
-            'load_power',
-            'loadPower',
-            'consumption',
+        battery_soc = pick_path_number(kpi, [
+            ('deviceTips', 'SOC'),
+            ('deviceTips', 'soc'),
+            ('battery', 'SOC'),
+            ('battery', 'soc'),
         ])
-        # storage_charge_discharge_power: positive = charging, negative = discharging
-        batt_raw = pick_number(kpi, [
-            'storage_charge_discharge_power',
-            'storageChargeDischargePower',
-            'battery_power',
-            'batteryPower',
+        battery_power = pick_path_number(kpi, [
+            ('deviceTips', 'BATTERY_POWER'),
+            ('deviceTips', 'batteryPower'),
+            ('battery', 'power'),
+            ('battery', 'currentPower'),
         ])
-        grid_export = pick_number(kpi, [
-            'grid_export',
-            'grid_power',
-            'gridPower',
-            'pgrid',
+        consumption_kw = pick_path_number(kpi, [
+            ('electricalLoad',),
+            ('electricalLoad', 'value'),
+            ('electricalLoad', 'power'),
+            ('load', 'power'),
+            ('load',),
+        ])
+        grid_import = pick_path_number(kpi, [
+            ('buy', 'power'),
+            ('grid', 'buy', 'power'),
+        ])
+        grid_export = pick_path_number(kpi, [
+            ('sell', 'power'),
+            ('grid', 'sell', 'power'),
         ])
 
         if solar_kw is None:
-            solar_kw = 0.0
+            solar_kw = pick_path_number(kpi, [
+                ('currentPower',),
+                ('realTimePower',),
+                ('inverterPower',),
+                ('inverter_power',),
+                ('activePower',),
+                ('active_power',),
+            ])
+        if battery_soc is None:
+            battery_soc = pick_path_number(kpi, [
+                ('storage_state_of_charge',),
+                ('batteryStateOfCharge',),
+                ('battery_soc',),
+                ('ess_soc',),
+            ])
+        if battery_power is None:
+            battery_power = pick_path_number(kpi, [
+                ('storage_charge_discharge_power',),
+                ('storageChargeDischargePower',),
+                ('battery_power',),
+                ('batteryPower',),
+            ])
         if consumption_kw is None:
-            consumption_kw = 0.0
-        if batt_raw is None:
-            batt_raw = 0.0
+            consumption_kw = pick_path_number(kpi, [
+                ('use_power',),
+                ('load_power',),
+                ('loadPower',),
+                ('consumption',),
+            ])
+        if grid_import is None:
+            grid_import = pick_path_number(kpi, [
+                ('grid_import',),
+                ('gridImportKw',),
+            ])
         if grid_export is None:
-            grid_export = 0.0
+            grid_export = pick_path_number(kpi, [
+                ('grid_export',),
+                ('grid_power',),
+                ('gridPower',),
+                ('pgrid',),
+            ])
 
-        # Battery SOC — try every field name FusionSolar uses across firmware versions.
-        # Store None (JSON null) when absent so the app knows there is no battery,
-        # rather than defaulting to 0 which looks like a dead battery.
-        _soc_raw = (
-            kpi.get('storage_state_of_charge')
-            or kpi.get('batteryStateOfCharge')
-            or kpi.get('battery_soc')
-            or kpi.get('ess_soc')
-        )
-        battery_soc = float(_soc_raw) if _soc_raw is not None and float(_soc_raw) > 0 else None
+        battery_soc = battery_soc if battery_soc is not None and battery_soc > 0 else None
+        battery_power = battery_power if battery_power is not None else None
+        battery_charge = max(0.0, battery_power) if battery_power is not None else None
+        battery_discharge = max(0.0, -battery_power) if battery_power is not None else None
 
         data_to_send = {
             'solar_power': solar_kw,
             'realTimePower': solar_kw,
             'battery_soc': battery_soc,
-            'battery_charge': max(0.0, batt_raw),
-            'battery_discharge': max(0.0, -batt_raw),
+            'battery_power': battery_power,
+            'battery_charge': battery_charge,
+            'battery_discharge': battery_discharge,
             'consumption': consumption_kw,
+            'grid_import': grid_import,
             'grid_export': grid_export,
-            'grid_import': max(0.0, consumption_kw + max(0.0, batt_raw) + grid_export - solar_kw - max(0.0, -batt_raw)),
             'synced_at': datetime.now(timezone.utc).isoformat(),
+            'raw_flow': flow_data,
             'raw': kpi,
         }
 
@@ -331,7 +366,6 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
-            'resolvedPlantId': plant_id,
         })
         if status_result is None:
             raise RuntimeError(f'FusionSolar live data was written but status update failed for station={station_id}')
