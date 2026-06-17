@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import time
 import requests
@@ -105,6 +106,12 @@ def coerce_number(value):
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
+        match = re.search(r'-?\d+(?:\.\d+)?', value.replace(',', '.'))
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
         try:
             return float(value)
         except ValueError:
@@ -161,6 +168,82 @@ def pick_path_number(payload, paths):
         if value is None:
             continue
         candidate = first_number_in(value)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def flow_nodes(flow_payload):
+    nodes = get_path_value(flow_payload, ('data', 'flow', 'nodes'))
+    return nodes if isinstance(nodes, list) else []
+
+
+def flow_links(flow_payload):
+    links = get_path_value(flow_payload, ('data', 'flow', 'links'))
+    return links if isinstance(links, list) else []
+
+
+def lower_text(value):
+    return str(value).strip().lower() if value is not None else ''
+
+
+def node_text(node):
+    if not isinstance(node, dict):
+        return ''
+    parts = [
+        node.get('id'),
+        node.get('name'),
+        node.get('label'),
+        node.get('type'),
+        node.get('icon'),
+        node.get('description', {}).get('value') if isinstance(node.get('description'), dict) else None,
+        node.get('description', {}).get('label') if isinstance(node.get('description'), dict) else None,
+        node.get('deviceTips', {}).get('SOC') if isinstance(node.get('deviceTips'), dict) else None,
+        node.get('deviceTips', {}).get('BATTERY_POWER') if isinstance(node.get('deviceTips'), dict) else None,
+    ]
+    return ' '.join(lower_text(part) for part in parts if part is not None)
+
+
+def link_text(link):
+    if not isinstance(link, dict):
+        return ''
+    parts = [
+        link.get('id'),
+        link.get('name'),
+        link.get('label'),
+        link.get('type'),
+        link.get('description', {}).get('value') if isinstance(link.get('description'), dict) else None,
+        link.get('description', {}).get('label') if isinstance(link.get('description'), dict) else None,
+    ]
+    return ' '.join(lower_text(part) for part in parts if part is not None)
+
+
+def find_node(flow_payload, terms):
+    needle_terms = [lower_text(term) for term in terms if term]
+    for node in flow_nodes(flow_payload):
+        hay = node_text(node)
+        if all(term in hay for term in needle_terms):
+            return node
+    return None
+
+
+def find_link(flow_payload, terms):
+    needle_terms = [lower_text(term) for term in terms if term]
+    for link in flow_links(flow_payload):
+        hay = link_text(link)
+        if all(term in hay for term in needle_terms):
+            return link
+    return None
+
+
+def node_value(node):
+    if not isinstance(node, dict):
+        return None
+    candidate = coerce_number(node.get('value'))
+    if candidate is not None:
+        return candidate
+    if isinstance(node.get('description'), dict):
+        candidate = coerce_number(node['description'].get('value'))
         if candidate is not None:
             return candidate
     return None
@@ -308,44 +391,16 @@ for job in jobs:
         if not isinstance(kpi, dict) or not kpi:
             raise ValueError('FusionSolar KPI response was empty or malformed')
 
-        # get_plant_flow exposes the most useful live values for Basalt.
-        # Positive BATTERY_POWER means charging in the observed flow balance.
-        solar_kw = pick_path_number(kpi, [
-            ('PV',),
-            ('pv',),
-            ('PV', 'value'),
-            ('PV', 'power'),
-            ('pv', 'value'),
-            ('pv', 'power'),
-        ])
-        battery_soc = pick_path_number(kpi, [
-            ('deviceTips', 'SOC'),
-            ('deviceTips', 'soc'),
-            ('battery', 'SOC'),
-            ('battery', 'soc'),
-        ])
-        battery_power = pick_path_number(kpi, [
-            ('deviceTips', 'BATTERY_POWER'),
-            ('deviceTips', 'batteryPower'),
-            ('battery', 'power'),
-            ('battery', 'currentPower'),
-        ])
-        consumption_kw = pick_path_number(kpi, [
-            ('electricalLoad',),
-            ('electricalLoad', 'value'),
-            ('electricalLoad', 'power'),
-            ('load', 'power'),
-            ('load',),
-        ])
-        grid_import = pick_path_number(kpi, [
-            ('buy', 'power'),
-            ('grid', 'buy', 'power'),
-        ])
-        grid_export = pick_path_number(kpi, [
-            ('sell', 'power'),
-            ('grid', 'sell', 'power'),
-        ])
+        flow_source = flow_data if isinstance(flow_data, dict) and flow_data else {}
+        flow_payload = get_path_value(flow_source, ('data', 'flow')) or flow_source
 
+        pv_node = find_node(flow_source, ['pv'])
+        battery_node = find_node(flow_source, ['energy_store', 'battery'])
+        load_node = find_node(flow_source, ['electricalload'])
+        grid_buy_link = find_link(flow_source, ['buy.power']) or find_link(flow_source, ['buy', 'power'])
+        grid_sell_link = find_link(flow_source, ['sell.power']) or find_link(flow_source, ['sell', 'power'])
+
+        solar_kw = node_value(pv_node)
         if solar_kw is None:
             solar_kw = pick_path_number(kpi, [
                 ('currentPower',),
@@ -355,8 +410,22 @@ for job in jobs:
                 ('activePower',),
                 ('active_power',),
             ])
+
+        battery_soc = None
+        battery_power = None
+        if isinstance(battery_node, dict):
+            device_tips = battery_node.get('deviceTips') if isinstance(battery_node.get('deviceTips'), dict) else {}
+            battery_soc = coerce_number(device_tips.get('SOC') or device_tips.get('soc'))
+            battery_power = coerce_number(device_tips.get('BATTERY_POWER') or device_tips.get('batteryPower'))
+            if battery_power is None:
+                battery_power = node_value(battery_node)
+
         if battery_soc is None:
             battery_soc = pick_path_number(kpi, [
+                ('deviceTips', 'SOC'),
+                ('deviceTips', 'soc'),
+                ('battery', 'SOC'),
+                ('battery', 'soc'),
                 ('storage_state_of_charge',),
                 ('batteryStateOfCharge',),
                 ('battery_soc',),
@@ -364,25 +433,42 @@ for job in jobs:
             ])
         if battery_power is None:
             battery_power = pick_path_number(kpi, [
+                ('deviceTips', 'BATTERY_POWER'),
+                ('deviceTips', 'batteryPower'),
                 ('storage_charge_discharge_power',),
                 ('storageChargeDischargePower',),
                 ('battery_power',),
                 ('batteryPower',),
             ])
+
+        consumption_kw = node_value(load_node)
         if consumption_kw is None:
             consumption_kw = pick_path_number(kpi, [
+                ('electricalLoad',),
+                ('electricalLoad', 'value'),
+                ('electricalLoad', 'power'),
+                ('load', 'power'),
+                ('load',),
                 ('use_power',),
                 ('load_power',),
                 ('loadPower',),
                 ('consumption',),
             ])
+
+        grid_import = node_value(grid_buy_link)
         if grid_import is None:
             grid_import = pick_path_number(kpi, [
+                ('buy', 'power'),
+                ('grid', 'buy', 'power'),
                 ('grid_import',),
                 ('gridImportKw',),
             ])
+
+        grid_export = node_value(grid_sell_link)
         if grid_export is None:
             grid_export = pick_path_number(kpi, [
+                ('sell', 'power'),
+                ('grid', 'sell', 'power'),
                 ('grid_export',),
                 ('grid_power',),
                 ('gridPower',),
