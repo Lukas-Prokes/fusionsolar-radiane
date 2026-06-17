@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import requests
 import urllib3
 from datetime import datetime, timezone
@@ -79,11 +80,23 @@ def write_status(station_id, updates):
 
 
 def mark_status(station_id, updates):
-    try:
-        return write_status(station_id, updates)
-    except Exception as e:
-        print(f'Failed to update FusionSolar status for station={station_id}: {e}', file=sys.stderr)
-        return None
+    last_error = None
+    for attempt in range(3):
+        try:
+            return write_status(station_id, updates)
+        except Exception as e:
+            last_error = e
+            print(
+                f'Failed to update FusionSolar status for station={station_id} '
+                f'(attempt {attempt + 1}/3): {e}',
+                file=sys.stderr,
+            )
+            time.sleep(0.5 * (attempt + 1))
+    print(
+        f'Giving up on FusionSolar status update for station={station_id}: {last_error}',
+        file=sys.stderr,
+    )
+    return None
 
 
 # Load sync jobs from KV — guard against all HTTP error codes, not just 404.
@@ -204,13 +217,6 @@ for job in jobs:
             verify=True,
         )
         put_resp.raise_for_status()
-        legacy_put_resp = requests.put(
-            kv_url(legacy_kv_key),
-            data=json.dumps(data_to_send),
-            headers={**cf_headers, 'Content-Type': 'application/json'},
-            verify=True,
-        )
-        legacy_put_resp.raise_for_status()
 
         status_result = mark_status(station_id, {
             'lastStage': 'live_data_written',
@@ -225,6 +231,20 @@ for job in jobs:
         })
         if status_result is None:
             raise RuntimeError(f'FusionSolar live data was written but status update failed for station={station_id}')
+
+        try:
+            legacy_put_resp = requests.put(
+                kv_url(legacy_kv_key),
+                data=json.dumps(data_to_send),
+                headers={**cf_headers, 'Content-Type': 'application/json'},
+                verify=True,
+            )
+            legacy_put_resp.raise_for_status()
+        except Exception as e:
+            print(
+                f'Legacy SOLAR_LIVE write failed for station={station_id}: {e}',
+                file=sys.stderr,
+            )
 
         print(f'Synced station={station_id} ({job.get("stationName", "")}) → {kv_key}')
 
