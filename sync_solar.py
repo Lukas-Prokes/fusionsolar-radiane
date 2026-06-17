@@ -99,6 +99,52 @@ def mark_status(station_id, updates):
     return None
 
 
+def _debug_station_identifiers(stations):
+    return [
+        {
+            'stationCode': s.get('stationCode'),
+            'dn': s.get('dn') or s.get('stationDn') or s.get('plantDn'),
+            'stationName': s.get('stationName') or s.get('name'),
+        }
+        for s in stations
+        if isinstance(s, dict)
+    ]
+
+
+def resolve_plant_id(client, station_id):
+    stations = client.get_station_list()
+    plant_ids = client.get_plant_ids()
+
+    print(f'FusionSolar debug: SYNC_JOBS stationId={station_id}')
+    print(f'FusionSolar debug: get_plant_ids={plant_ids}')
+    print(f'FusionSolar debug: get_station_list identifiers={_debug_station_identifiers(stations)}')
+
+    station_id_str = str(station_id)
+    plant_id_candidates = [str(pid) for pid in plant_ids if pid is not None]
+    if station_id_str in plant_id_candidates:
+        return station_id_str
+
+    for station in stations:
+        if not isinstance(station, dict):
+            continue
+        station_code = str(station.get('stationCode') or '')
+        if station_code == station_id_str:
+            resolved = station.get('dn') or station.get('stationDn') or station.get('plantDn')
+            if resolved:
+                print(f'FusionSolar debug: mapped stationCode={station_id_str} -> plantId={resolved}')
+                return str(resolved)
+
+    if len(plant_id_candidates) == 1:
+        resolved = plant_id_candidates[0]
+        print(f'FusionSolar debug: fallback single plantId={resolved} for stationId={station_id_str}')
+        return resolved
+
+    raise ValueError(
+        f'Could not resolve FusionSolar plant id for stationId={station_id_str}; '
+        f'plantIds={plant_id_candidates}; stationList={_debug_station_identifiers(stations)}'
+    )
+
+
 # Load sync jobs from KV — guard against all HTTP error codes, not just 404.
 resp = requests.get(kv_url('SYNC_JOBS'), headers=cf_headers, verify=True)
 
@@ -166,7 +212,16 @@ for job in jobs:
             'region': region,
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
-        kpi = client.get_current_plant_data(station_id)
+        plant_id = resolve_plant_id(client, station_id)
+        mark_status(station_id, {
+            'resolvedPlantId': plant_id,
+            'jobId': job.get('jobId'),
+            'householdId': job.get('householdId'),
+            'userId': job.get('userId'),
+            'stationName': job.get('stationName'),
+            'region': region,
+        })
+        kpi = client.get_current_plant_data(plant_id)
         mark_status(station_id, {
             'lastStage': 'kpi_fetched',
             'jobId': job.get('jobId'),
@@ -174,6 +229,7 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
+            'resolvedPlantId': plant_id,
         })
 
         if not isinstance(kpi, dict) or not kpi:
@@ -228,6 +284,7 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
+            'resolvedPlantId': plant_id,
         })
         if status_result is None:
             raise RuntimeError(f'FusionSolar live data was written but status update failed for station={station_id}')
