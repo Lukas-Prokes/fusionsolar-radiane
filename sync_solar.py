@@ -233,8 +233,9 @@ for job in jobs:
             'region': region,
         })
         client = FusionSolarClient(username, password, huawei_subdomain=region)
-        flow_data = client.get_plant_flow(plant_id)
-        kpi = flow_data if isinstance(flow_data, dict) and flow_data else client.get_current_plant_data(plant_id)
+        resolved_plant_id = job.get('resolvedPlantId') or job.get('plantId') or station_id
+        flow_data = client.get_plant_flow(resolved_plant_id)
+        kpi = flow_data if isinstance(flow_data, dict) and flow_data else client.get_current_plant_data(resolved_plant_id)
         mark_status(station_id, {
             'lastStage': 'kpi_fetched',
             'jobId': job.get('jobId'),
@@ -242,6 +243,7 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
+            'resolvedPlantId': resolved_plant_id,
         })
 
         if not isinstance(kpi, dict) or not kpi:
@@ -366,6 +368,7 @@ for job in jobs:
             'userId': job.get('userId'),
             'stationName': job.get('stationName'),
             'region': region,
+            'resolvedPlantId': resolved_plant_id,
         })
         if status_result is None:
             raise RuntimeError(f'FusionSolar live data was written but status update failed for station={station_id}')
