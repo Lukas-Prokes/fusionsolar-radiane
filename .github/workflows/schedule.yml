@@ -3,6 +3,10 @@ on:
   schedule:
     - cron: '* * * * *'
   workflow_dispatch:
+    inputs:
+      station_id:
+        required: false
+        type: string
 
 jobs:
   sync:
@@ -19,4 +23,5 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_KV_ID: ${{ secrets.CF_KV_ID }}
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          SYNC_STATION_ID: ${{ github.event.inputs.station_id }}
         run: python3 sync_solar.py
