@@ -367,6 +367,11 @@ if not isinstance(jobs, list):
     )
     sys.exit(1)
 
+target_station_id = os.environ.get('SYNC_STATION_ID', '').strip()
+if target_station_id:
+    jobs = [job for job in jobs if str(job.get('stationId')) == target_station_id]
+    print(f'Filtered to {len(jobs)} sync job(s) for stationId={target_station_id}')
+
 print(f'Found {len(jobs)} sync job(s)')
 
 for job in jobs:
@@ -495,9 +500,6 @@ for job in jobs:
                 ('sell', 'power'),
                 ('grid', 'sell', 'power'),
                 ('grid_export',),
-                ('grid_power',),
-                ('gridPower',),
-                ('pgrid',),
             ])
 
         battery_soc = battery_soc if battery_soc is not None and battery_soc > 0 else None
