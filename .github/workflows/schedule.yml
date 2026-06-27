@@ -8,6 +8,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: fusion-solar-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
