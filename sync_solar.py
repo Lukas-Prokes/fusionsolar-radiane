@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import hashlib
 import requests
 import urllib3
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ requests.Session.request = _no_verify_request
 CF_ACCOUNT_ID = os.environ['CF_ACCOUNT_ID']
 CF_KV_ID = os.environ['CF_KV_ID']
 CF_TOKEN = os.environ['CF_TOKEN']
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 
 cf_headers = {'Authorization': f'Bearer {CF_TOKEN}'}
 
@@ -98,6 +101,160 @@ def mark_status(station_id, updates):
         file=sys.stderr,
     )
     return None
+
+
+def supabase_headers():
+    return {
+        'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+    }
+
+
+def normalize_recorded_at(value):
+    if not isinstance(value, str) or not value.strip():
+        return now_iso()
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def history_number(value):
+    number = coerce_number(value)
+    return number if number is not None else None
+
+
+def build_history_row(job, live_data):
+    household_id = str(job.get('householdId') or '').strip()
+    if not household_id:
+        return None
+
+    return {
+        'household_id': household_id,
+        'recorded_at': normalize_recorded_at(live_data.get('synced_at')),
+        'solar_kw': history_number(live_data.get('solar_power')),
+        'battery_soc': history_number(live_data.get('battery_soc')),
+        'battery_charge_kw': history_number(live_data.get('battery_charge')),
+        'battery_discharge_kw': history_number(live_data.get('battery_discharge')),
+        'grid_import_kw': history_number(live_data.get('grid_import')),
+        'grid_export_kw': history_number(live_data.get('grid_export')),
+        'consumption_kw': history_number(live_data.get('consumption')),
+    }
+
+
+def history_sample_hash(row):
+    payload = json.dumps(row, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def history_dedupe_key(row):
+    return f'HISTORY_SAMPLE_{row["household_id"]}_{history_sample_hash(row)}'
+
+
+def kv_key_exists(key):
+    resp = requests.get(kv_url(key), headers=cf_headers, verify=True)
+    if resp.status_code == 404:
+        return False
+    resp.raise_for_status()
+    return True
+
+
+def write_history_dedupe_key(key, row, station_id):
+    payload = {
+        'householdId': row['household_id'],
+        'recordedAt': row['recorded_at'],
+        'stationId': station_id,
+        'writtenAt': now_iso(),
+    }
+    resp = requests.put(
+        kv_url(key),
+        data=json.dumps(payload),
+        headers={**cf_headers, 'Content-Type': 'application/json'},
+        verify=True,
+    )
+    resp.raise_for_status()
+
+
+def energy_reading_exists(row):
+    resp = requests.get(
+        f'{SUPABASE_URL}/rest/v1/energy_readings',
+        params={
+            'select': 'recorded_at',
+            'household_id': f'eq.{row["household_id"]}',
+            'recorded_at': f'eq.{row["recorded_at"]}',
+            'limit': '1',
+        },
+        headers=supabase_headers(),
+        timeout=10,
+        verify=True,
+    )
+    resp.raise_for_status()
+    return bool(resp.json())
+
+
+def insert_energy_reading(row):
+    resp = requests.post(
+        f'{SUPABASE_URL}/rest/v1/energy_readings',
+        data=json.dumps(row),
+        headers={**supabase_headers(), 'Prefer': 'return=minimal'},
+        timeout=10,
+        verify=True,
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f'Supabase history insert failed ({resp.status_code}): {resp.text[:500]}'
+        )
+
+
+def persist_history_sample(job, station_id, live_data):
+    row = build_history_row(job, live_data)
+    if row is None:
+        print(f'History write skipped for station={station_id}: missing householdId')
+        return
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        print(
+            f'History write skipped for station={station_id} '
+            f'household={row["household_id"]}: missing Supabase server credentials',
+            file=sys.stderr,
+        )
+        return
+
+    dedupe_key = history_dedupe_key(row)
+    try:
+        if kv_key_exists(dedupe_key):
+            print(
+                f'History write skipped for station={station_id} '
+                f'household={row["household_id"]}: duplicate sample hash'
+            )
+            return
+
+        if energy_reading_exists(row):
+            write_history_dedupe_key(dedupe_key, row, station_id)
+            print(
+                f'History write skipped for station={station_id} '
+                f'household={row["household_id"]}: recorded_at already exists'
+            )
+            return
+
+        insert_energy_reading(row)
+        write_history_dedupe_key(dedupe_key, row, station_id)
+        print(
+            f'History sample written for station={station_id} '
+            f'household={row["household_id"]} recorded_at={row["recorded_at"]}'
+        )
+    except Exception as e:
+        print(
+            f'History write failed for station={station_id} '
+            f'household={row["household_id"]} recorded_at={row["recorded_at"]}: {e}',
+            file=sys.stderr,
+        )
 
 
 def coerce_number(value):
@@ -529,6 +686,8 @@ for job in jobs:
             verify=True,
         )
         put_resp.raise_for_status()
+
+        persist_history_sample(job, station_id, data_to_send)
 
         status_result = mark_status(station_id, {
             'lastStage': 'live_data_written',
